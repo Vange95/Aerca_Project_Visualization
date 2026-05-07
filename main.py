@@ -183,6 +183,7 @@ def main(argv, progress_callback=None, data_class=None):
         'num_vars': options.get('num_vars', 6),
         'data_class': data_class,
         'options': options,
+        'aerca_model': aerca_model,
     }
 
 

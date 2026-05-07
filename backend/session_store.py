@@ -33,6 +33,36 @@ class Session:
     _subscribers: List[asyncio.Queue] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # 流式生成状态（仅 linear 数据集）
+    stream_is_running: bool = False
+    stream_inject_pending: bool = False
+    stream_buffer: List[Any] = field(default_factory=list)
+    stream_anomaly_flags: List[bool] = field(default_factory=list)
+    _stream_subscribers: List[asyncio.Queue] = field(default_factory=list)
+
+    def push_stream(self, msg: Dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+        """从工作线程调用：把流式 tick 推送到所有流订阅者。"""
+        with self._lock:
+            subs = list(self._stream_subscribers)
+        for q in subs:
+            try:
+                asyncio.run_coroutine_threadsafe(q.put(msg), loop)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def add_stream_subscriber(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=2048)
+        with self._lock:
+            self._stream_subscribers.append(q)
+        return q
+
+    def remove_stream_subscriber(self, q: asyncio.Queue) -> None:
+        with self._lock:
+            try:
+                self._stream_subscribers.remove(q)
+            except ValueError:
+                pass
+
     def push_progress(self, info: Dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
         """从工作线程调用：把进度推送到所有订阅者。"""
         with self._lock:

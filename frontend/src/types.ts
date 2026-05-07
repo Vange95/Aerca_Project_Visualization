@@ -1,3 +1,16 @@
+export interface StreamTick {
+  type: 'tick' | 'stopped' | 'hello' | 'ping' | 'error'
+  t?: number
+  values?: number[]
+  scores?: number[]
+  detected?: boolean[]
+  is_anomaly_step?: boolean
+  anomaly_vars?: number[] | null
+  anomaly_amp?: number | null
+  is_running?: boolean
+  message?: string
+}
+
 export interface DatasetInfo {
   name: string
   description?: string

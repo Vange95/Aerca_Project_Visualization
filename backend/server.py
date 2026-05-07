@@ -456,6 +456,147 @@ def get_results(sid: str):
     return out
 
 
+# ============================================================
+# 流式数据生成 + 实时异常检测（仅 linear 数据集）
+# ============================================================
+def _stream_loop(session: Session, loop: asyncio.AbstractEventLoop) -> None:
+    """在线程池中循环生成 linear 时间序列数据点并实时推理。每 300ms 发出一个 tick。"""
+    import time as _time
+
+    a = session.data_class.data_dict['a']
+    mul = float(session.options.get('mul', 3))
+    window_size = int(session.options.get('window_size', 1))
+
+    # 从现有 buffer 末尾恢复状态，或从零开始
+    with session._lock:
+        if len(session.stream_buffer) > 0:
+            prev = np.array(session.stream_buffer[-1], dtype=float)
+        else:
+            prev = np.zeros(4)
+
+    while session.stream_is_running:
+        eps = 0.4 * np.random.randn(4)
+        xp, wp, yp, zp = prev
+        pt = np.array([
+            a[0] * xp + eps[0],
+            a[1] * wp + a[2] * xp + eps[1],
+            a[3] * yp + a[4] * wp + eps[2],
+            a[5] * zp + a[6] * wp + a[7] * yp + eps[3],
+        ])
+
+        is_anomaly = False
+        anomaly_vars: List[int] = []
+        anomaly_amp: float = 0.0
+        if session.stream_inject_pending:
+            session.stream_inject_pending = False
+            anomaly_amp = mul * 2.0
+            n_feat = np.random.randint(1, 4)
+            feat = np.random.choice(4, size=n_feat, replace=False)
+            pt[feat] += anomaly_amp
+            is_anomaly = True
+            anomaly_vars = [int(v) for v in feat]
+
+        with session._lock:
+            session.stream_buffer.append(pt.tolist())
+            session.stream_anomaly_flags.append(is_anomaly)
+            buf = list(session.stream_buffer)
+
+        scores: List[float] = [0.0] * 4
+        detected: List[bool] = [False] * 4
+        if (
+            len(buf) >= window_size + 1
+            and session.run_status == "done"
+            and session.results is not None
+        ):
+            model = session.results.get("aerca_model")
+            if model is not None:
+                try:
+                    window_arr = np.array(buf[-(window_size + 1):], dtype=np.float32)
+                    result = model.infer_single_window(window_arr)
+                    scores = result["scores"]
+                    detected = result["detected"]
+                except Exception:  # noqa: BLE001
+                    pass
+
+        msg: Dict[str, Any] = {
+            "type": "tick",
+            "t": len(buf) - 1,
+            "values": pt.tolist(),
+            "scores": scores,
+            "detected": detected,
+            "is_anomaly_step": is_anomaly,
+            "anomaly_vars": anomaly_vars if is_anomaly else None,
+            "anomaly_amp": anomaly_amp if is_anomaly else None,
+        }
+        session.push_stream(msg, loop)
+        prev = pt
+        _time.sleep(0.3)
+
+    session.push_stream({"type": "stopped"}, loop)
+
+
+@app.post("/api/sessions/{sid}/stream/start")
+async def stream_start(sid: str):
+    s = _require_session(sid)
+    if s.dataset_name != "linear":
+        raise HTTPException(400, "Streaming only supported for the linear dataset")
+    if s.run_status != "done":
+        raise HTTPException(400, "Model must be fully trained before starting the stream")
+    if s.stream_is_running:
+        raise HTTPException(409, "Stream already running")
+    s.stream_is_running = True
+    s.stream_inject_pending = False
+    s.stream_buffer = []
+    s.stream_anomaly_flags = []
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _stream_loop, s, loop)
+    return {"status": "started"}
+
+
+@app.post("/api/sessions/{sid}/stream/inject")
+def stream_inject(sid: str):
+    s = _require_session(sid)
+    if not s.stream_is_running:
+        raise HTTPException(400, "Stream is not running")
+    s.stream_inject_pending = True
+    return {"status": "pending"}
+
+
+@app.post("/api/sessions/{sid}/stream/stop")
+def stream_stop(sid: str):
+    s = _require_session(sid)
+    s.stream_is_running = False
+    return {"status": "stopped"}
+
+
+@app.websocket("/api/sessions/{sid}/stream/ws")
+async def stream_ws(websocket: WebSocket, sid: str):
+    await websocket.accept()
+    s = store.get(sid)
+    if s is None:
+        await websocket.send_json({"type": "error", "message": f"Session not found: {sid}"})
+        await websocket.close()
+        return
+
+    queue = s.add_stream_subscriber()
+    try:
+        await websocket.send_json({"type": "hello", "is_running": s.stream_is_running})
+        while True:
+            try:
+                msg = await asyncio.wait_for(queue.get(), timeout=30.0)
+                await websocket.send_json(msg)
+                if msg.get("type") == "stopped":
+                    break
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping"})
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001
+        logger.exception("Stream WebSocket error")
+    finally:
+        s.remove_stream_subscriber(queue)
+
+
 @app.delete("/api/sessions/{sid}")
 def delete_session(sid: str):
     if not store.delete(sid):

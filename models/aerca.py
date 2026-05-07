@@ -416,6 +416,59 @@ class AERCA(nn.Module):
     #     self._log_and_print('Causal discovery Hamming Distance: {:.5f} std: {:.5f}',
     #                         np.mean(encoder_hamming), np.std(encoder_hamming))
 
+    def infer_single_window(self, window: np.ndarray) -> dict:
+        """实时单步推理，供流式监测使用。
+
+        Parameters
+        ----------
+        window : np.ndarray, shape (window_size+1, num_vars)
+            滑动窗口：前 window_size 步作为历史，最后一步为当前点。
+
+        Returns
+        -------
+        dict
+            scores  : list[float]  每个变量的异常 z-score（越高越可疑）
+            detected: list[bool]   每个变量是否超出训练阶段的分位数阈值
+        """
+        if window.shape[0] < self.window_size + 1:
+            return {
+                'scores': [0.0] * self.num_vars,
+                'detected': [False] * self.num_vars,
+            }
+
+        self.eval()
+        with torch.no_grad():
+            winds_np = window[:self.window_size, :].astype(np.float32)
+            next_np = window[self.window_size, :].astype(np.float32)
+
+            winds_t = torch.tensor(winds_np).unsqueeze(0).to(self.device)
+            next_t = torch.tensor(next_np).unsqueeze(0).to(self.device)
+
+            preds, _ = self.encoder(winds_t)
+            us = preds - next_t
+            us_np = us.cpu().numpy()[0]
+
+        if hasattr(self, 'us_mean_encoder') and hasattr(self, 'us_std_encoder'):
+            z_scores = -(us_np - self.us_mean_encoder) / (self.us_std_encoder + 1e-8)
+        else:
+            z_scores = np.zeros(self.num_vars)
+
+        if hasattr(self, 'upper_encoder') and hasattr(self, 'lower_encoder'):
+            detected = [
+                bool(
+                    (us_np[i] < self.lower_encoder[i] or us_np[i] > self.upper_encoder[i])
+                    and abs(z_scores[i]) > 3.0  # 额外 z-score 门槛，抑制正常数据的误报
+                )
+                for i in range(self.num_vars)
+            ]
+        else:
+            detected = [bool(abs(z) > 3.0) for z in z_scores]
+
+        return {
+            'scores': [float(s) for s in z_scores],
+            'detected': detected,
+        }
+
     def _testing_root_cause(self, xs, labels):
         """严格按照原始 topk / topk_at_step 逻辑计算指标，并提取可视化所需的 Top-1"""
         self.load_state_dict(torch.load(os.path.join(self.save_dir, f'{self.model_name}.pt'),

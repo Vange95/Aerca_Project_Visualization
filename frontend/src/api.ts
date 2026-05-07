@@ -66,3 +66,24 @@ export async function getResults(sessionId: string): Promise<RunResults & Sessio
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/results`)
   return handleJson(res)
 }
+
+export async function startStream(sessionId: string): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stream/start`, { method: 'POST' })
+  return handleJson(res)
+}
+
+export async function injectAnomaly(sessionId: string): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stream/inject`, { method: 'POST' })
+  return handleJson(res)
+}
+
+export async function stopStream(sessionId: string): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stream/stop`, { method: 'POST' })
+  return handleJson(res)
+}
+
+export function openStreamWS(sessionId: string): WebSocket {
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const host = window.location.host
+  return new WebSocket(`${protocol}://${host}/api/sessions/${sessionId}/stream/ws`)
+}

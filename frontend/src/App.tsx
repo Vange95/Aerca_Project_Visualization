@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import DataView from './components/DataView'
 import ResultsView from './components/ResultsView'
+import StreamView from './components/StreamView'
 import Plot from './components/Plot'
 import { useAppStore } from './store'
 import { getResults, openProgressWS, runModel } from './api'
@@ -236,6 +237,8 @@ export default function App() {
           )}
 
           <ResultsView />
+
+          <StreamView />
         </main>
       </div>
 
