@@ -16,6 +16,7 @@ def create_arg_parser():
     parser.add_argument('--num_vars', type=int, default=51, help='Number of variables (default: 51)')
     parser.add_argument('--causal_quantile', type=float, default=0.70, help='Causal quantile (default: 0.70)')
     parser.add_argument('--shuffle', type=int, default=1, help='Flag for shuffling data (default: 1)')
+    parser.add_argument('--fault_id', type=str, default=None, help='Fault scenario id')
 
     # Meta arguments
     parser.add_argument('--seed', type=int, default=4, help='Random seed (default: 4)')

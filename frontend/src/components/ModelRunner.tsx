@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Plot from './Plot'
 import { useAppStore } from '../store'
-import { getResults, openProgressWS, runModel } from '../api'
+import { getResults, openProgressWS, runModel, stopTraining } from '../api'
+import { Loader2, Play, RadioTower, Square } from 'lucide-react'
 
 export default function ModelRunner() {
   const session = useAppStore((s) => s.session)
@@ -17,6 +18,7 @@ export default function ModelRunner() {
 
   const [epochs, setEpochs] = useState(50)
   const [lr, setLr] = useState(0.001)
+  const [isStopping, setIsStopping] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
 
   // 关闭已有 WS（卸载或会话变化时）
@@ -41,13 +43,21 @@ export default function ModelRunner() {
         }
         appendProgress(msg)
         if (msg.phase === 'done') {
+          setIsStopping(false)
           setRunStatus('done')
           // 拉取最终结果
           getResults(session.session_id)
             .then((r) => setResults(r))
             .catch((e) => setToast({ kind: 'error', text: `获取结果失败：${e.message}` }))
         }
+        if (msg.phase === 'stopped') {
+          setIsStopping(false)
+          setRunStatus('stopped')
+          setRunError(null)
+          setToast({ kind: 'info', text: msg.message ?? '训练已停止' })
+        }
         if (msg.phase === 'error') {
+          setIsStopping(false)
           setRunStatus('failed')
           setRunError(msg.message ?? 'Unknown error')
         }
@@ -66,6 +76,7 @@ export default function ModelRunner() {
   async function handleRun() {
     if (!session) return
     setRunError(null)
+    setIsStopping(false)
     resetProgress()
     setRunStatus('running')
     ensureWebSocket()
@@ -76,6 +87,18 @@ export default function ModelRunner() {
       setRunStatus('failed')
       setRunError(e.message)
       setToast({ kind: 'error', text: `启动失败：${e.message}` })
+    }
+  }
+
+  async function handleStopTraining() {
+    if (!session || runStatus !== 'running') return
+    setIsStopping(true)
+    try {
+      await stopTraining(session.session_id)
+      setToast({ kind: 'info', text: '正在停止训练，当前计算批次结束后生效...' })
+    } catch (e: any) {
+      setIsStopping(false)
+      setToast({ kind: 'error', text: `停止失败：${e.message}` })
     }
   }
 
@@ -102,41 +125,56 @@ export default function ModelRunner() {
 
   return (
     <div className="glass-panel p-5 space-y-5">
-      <h3 className="section-title mb-0">🔬 AERCA 模型训练与根因分析</h3>
+      <h3 className="section-title mb-0">
+        <RadioTower className="h-4 w-4 text-blue-600" />
+        AERCA 模型训练与根因分析
+      </h3>
 
       {session && (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(110px,1fr)_minmax(110px,1fr)_minmax(290px,auto)]">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">训练轮数 (epochs)</label>
+              <label className="field-label">训练轮数 (epochs)</label>
               <input
                 type="number"
                 min={1}
                 max={5000}
                 step={1}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-white/80 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                className="field-control"
                 value={epochs}
                 onChange={(e) => setEpochs(parseInt(e.target.value || '1', 10))}
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">学习率</label>
+              <label className="field-label">学习率</label>
               <input
                 type="number"
                 step={0.0001}
-                className="w-full border rounded-lg px-3 py-2 text-sm bg-white/80 focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                className="field-control"
                 value={lr}
                 onChange={(e) => setLr(parseFloat(e.target.value || '0.001'))}
               />
             </div>
-            <div className="flex items-end">
+            <div className="flex items-end gap-2">
               <button
                 disabled={runStatus === 'running'}
                 onClick={handleRun}
-                className="w-full py-2.5 rounded-lg bg-gradient-to-r from-emerald-500 to-cyan-500 text-white text-sm font-semibold shadow-lg shadow-emerald-200 hover:shadow-emerald-300 transition disabled:opacity-60"
+                className="btn-primary flex-1"
               >
-                {runStatus === 'running' ? '⏳ 训练中…' : '🚀 启动训练 + 根因分析'}
+                {runStatus === 'running' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                {runStatus === 'running' ? '训练中' : '启动训练 + 根因分析'}
               </button>
+              {runStatus === 'running' && (
+                <button
+                  type="button"
+                  disabled={isStopping}
+                  onClick={handleStopTraining}
+                  className="btn-danger shrink-0"
+                >
+                  {isStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                  {isStopping ? '停止中' : '停止训练'}
+                </button>
+              )}
             </div>
           </div>
 
@@ -145,12 +183,14 @@ export default function ModelRunner() {
             <span
               className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
                 runStatus === 'idle'
-                  ? 'bg-slate-200 text-slate-700'
+                  ? 'border-slate-200 bg-slate-50 text-slate-600'
                   : runStatus === 'running'
-                  ? 'bg-orange-200 text-orange-800'
+                  ? 'border-amber-200 bg-amber-50 text-amber-700'
                   : runStatus === 'done'
-                  ? 'bg-emerald-200 text-emerald-800'
-                  : 'bg-rose-200 text-rose-800'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : runStatus === 'stopped'
+                  ? 'border-slate-200 bg-slate-50 text-slate-600'
+                  : 'border-rose-200 bg-rose-50 text-rose-700'
               }`}
             >
               {runStatus.toUpperCase()}
@@ -168,7 +208,7 @@ export default function ModelRunner() {
           {runStatus === 'running' && (
             <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
               <div
-                className="bg-gradient-to-r from-emerald-500 to-cyan-500 h-full transition-all"
+                className="h-full bg-blue-600 transition-all"
                 style={{ width: `${trainingProgressPct}%` }}
               />
             </div>
@@ -219,7 +259,7 @@ export default function ModelRunner() {
           {progress.length > 0 && (
             <details className="text-xs">
               <summary className="cursor-pointer text-slate-600 hover:text-slate-800">阶段日志 ({progress.length})</summary>
-              <div className="mt-2 max-h-44 overflow-y-auto bg-slate-50 rounded p-2 font-mono text-[11px] text-slate-700">
+              <div className="mt-2 max-h-44 overflow-y-auto rounded-lg bg-slate-50 p-2 font-mono text-[11px] text-slate-700">
                 {progress.map((p, i) => (
                   <div key={i}>
                     [{p.phase}] {p.epoch ? `epoch=${p.epoch}/${p.total_epochs} ` : ''}

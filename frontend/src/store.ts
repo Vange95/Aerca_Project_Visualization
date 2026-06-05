@@ -6,6 +6,7 @@ import type {
   RunResults,
   SampleData,
   SessionInfo,
+  FaultScenario,
 } from './types'
 
 interface AppState {
@@ -30,8 +31,8 @@ interface AppState {
   setTrueCausalMatrix: (m: number[][] | null) => void
 
   // 运行状态
-  runStatus: 'idle' | 'running' | 'done' | 'failed'
-  setRunStatus: (s: 'idle' | 'running' | 'done' | 'failed') => void
+  runStatus: 'idle' | 'running' | 'done' | 'failed' | 'stopped'
+  setRunStatus: (s: 'idle' | 'running' | 'done' | 'failed' | 'stopped') => void
   runError: string | null
   setRunError: (e: string | null) => void
 
@@ -51,6 +52,8 @@ interface AppState {
   // UI：预览所选异常类型
   previewAdtype: string
   setPreviewAdtype: (a: string) => void
+  previewFault: FaultScenario | null
+  setPreviewFault: (f: FaultScenario | null) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -87,4 +90,6 @@ export const useAppStore = create<AppState>((set) => ({
 
   previewAdtype: 'spike',
   setPreviewAdtype: (a) => set({ previewAdtype: a }),
+  previewFault: null,
+  setPreviewFault: (f) => set({ previewFault: f }),
 }))

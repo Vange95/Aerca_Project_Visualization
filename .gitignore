@@ -28,6 +28,7 @@ wheels/
 *.npz
 *.mat
 *.csv
+!datasets/*/fault_events.csv
 *.h5
 *.hdf5
 

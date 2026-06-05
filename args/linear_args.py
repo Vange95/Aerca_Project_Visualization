@@ -16,7 +16,7 @@ def create_arg_parser():
     parser.add_argument('--testing_size', type=int, default=100, help='Size of the testing set (default: 100)')
     parser.add_argument('--num_vars', type=int, default=4, help='Number of variables (default: 4)')
     parser.add_argument('--preprocessing_data', type=int, default=1, help='Flag for preprocessing data (default: 1)')
-    parser.add_argument('--adlength', type=int, default=1, help='Ad length (default: 60)')
+    parser.add_argument('--adlength', type=int, default=30, help='Ad length (default: 30)')
     # parser.add_argument('--adtype', type=str, default='non_causal', help='Ad type (default: non_causal)')
     parser.add_argument('--mul', type=int, default=3, help='Multiplier (default: 3)')
     parser.add_argument('--a', type=int, default=None, help='Parameter a (default: None)')
@@ -54,8 +54,13 @@ def create_arg_parser():
 
     # More
     parser.add_argument('--adtype', type=str, default='spike',
-                        choices=['spike', 'step', 'causal'],
-                        help='Type of anomaly to inject: spike, step, causal')
+                        choices=[
+                            'spike', 'step', 'causal',
+                            'step_up', 'step_down', 'drop_to_zero', 'signal_zero',
+                            'gradual_drift', 'stuck_value',
+                        ],
+                        help='Type of anomaly to inject')
+    parser.add_argument('--fault_id', type=str, default=None, help='Fault scenario id')
 
     return parser
 

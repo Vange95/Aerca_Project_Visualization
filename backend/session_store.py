@@ -22,9 +22,10 @@ class Session:
     created_at: float = field(default_factory=time.time)
 
     # 模型运行状态
-    run_status: str = "idle"  # idle | running | done | failed
+    run_status: str = "idle"  # idle | running | done | failed | stopped
     run_error: Optional[str] = None
     results: Optional[Dict[str, Any]] = None  # main.main 的返回值（已剥离不可序列化字段）
+    training_stop_requested: bool = False
 
     # 进度日志（每条都会通过 WS 推送）
     progress_log: List[Dict[str, Any]] = field(default_factory=list)
@@ -33,9 +34,12 @@ class Session:
     _subscribers: List[asyncio.Queue] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    # 流式生成状态（仅 linear 数据集）
+    # 流式生成状态（支持线性生成与测试样本回放两种来源）
     stream_is_running: bool = False
+    stream_stop_requested: bool = False
     stream_inject_pending: bool = False
+    stream_pending_fault_id: Optional[str] = None
+    stream_active_fault: Optional[Dict[str, Any]] = None
     stream_buffer: List[Any] = field(default_factory=list)
     stream_anomaly_flags: List[bool] = field(default_factory=list)
     _stream_subscribers: List[asyncio.Queue] = field(default_factory=list)

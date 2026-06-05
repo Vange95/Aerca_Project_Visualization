@@ -1,8 +1,11 @@
 // @ts-nocheck
 import { useEffect, useMemo, useState } from 'react'
 import Plot from './Plot'
+import MatrixHeatmap from './MatrixHeatmap'
 import { useAppStore } from '../store'
 import { getSample } from '../api'
+import { getVariableNames } from '../domain/variableNames'
+import { BarChart3, GitBranch, LineChart, Search } from 'lucide-react'
 
 const COLORS = [
   '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b',
@@ -11,24 +14,58 @@ const COLORS = [
   '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5',
 ]
 
-function getVarNames(dataset: string, n: number): string[] {
-  if (dataset === 'lotka_volterra') {
-    const p = Math.floor(n / 2)
-    return [
-      ...Array.from({ length: p }, (_, i) => `Prey_${i}`),
-      ...Array.from({ length: n - p }, (_, i) => `Predator_${i}`),
-    ]
+function patternPreviewLabel(pattern?: string) {
+  const labels: Record<string, string> = {
+    spike: '尖峰',
+    step: '阶跃',
+    step_up: '阶跃升高',
+    step_down: '阶跃降低',
+    drop_to_zero: '多路归零',
+    signal_zero: '信号丢失',
+    gradual_drift: '渐进漂移',
+    stuck_value: '卡滞死值',
+    oscillation: '异常振荡',
+    causal: '因果传播',
+    none: '数据波动',
   }
-  if (dataset === 'lorenz96') {
-    return Array.from({ length: n }, (_, i) => `X_${i}`)
+  return pattern ? (labels[pattern] ?? pattern) : '异常'
+}
+
+function buildPreviewSeries(pattern?: string) {
+  const x = Array.from({ length: 80 }, (_, i) => i)
+  const base = x.map((i) => 0.12 * Math.sin(i / 7) + 0.04 * Math.sin(i / 3.5))
+  const y = base.map((v) => v)
+  const start = 34
+  const end = 58
+
+  if (pattern === 'none') {
+    // dataset-level preview only
+  } else if (pattern === 'step_up' || pattern === 'step') {
+    for (let i = start; i < x.length; i++) y[i] += 1.0
+  } else if (pattern === 'step_down') {
+    for (let i = start; i < x.length; i++) y[i] -= 0.85
+  } else if (pattern === 'drop_to_zero' || pattern === 'signal_zero') {
+    for (let i = start; i < end; i++) y[i] = 0
+  } else if (pattern === 'gradual_drift' || pattern === 'causal') {
+    for (let i = start; i < x.length; i++) y[i] += Math.min(1.0, (i - start) * 0.035)
+  } else if (pattern === 'stuck_value') {
+    const hold = y[start]
+    for (let i = start; i < end; i++) y[i] = hold
+  } else if (pattern === 'oscillation') {
+    for (let i = start; i < end; i++) y[i] += 0.55 * Math.sin((i - start) * 0.85)
+  } else {
+    y[start] += 1.2
+    y[start + 18] -= 0.9
   }
-  return Array.from({ length: n }, (_, i) => `var_${i}`)
+
+  return { x, y, start, end }
 }
 
 export default function DataView() {
   const session = useAppStore((s) => s.session)
   const sessionInfo = useAppStore((s) => s.sessionInfo)
   const previewAdtype = useAppStore((s) => s.previewAdtype)
+  const previewFault = useAppStore((s) => s.previewFault)
   const sample = useAppStore((s) => s.currentSample)
   const idx = useAppStore((s) => s.currentSampleIdx)
   const setSample = useAppStore((s) => s.setCurrentSample)
@@ -61,32 +98,71 @@ export default function DataView() {
   }, [session, idx, runStatus, setSample])
 
   if (!session || !sample) {
-    const x = Array.from({ length: 80 }, (_, i) => i)
-    const demo = (() => {
-      if (previewAdtype === 'step') return x.map((i) => (i < 40 ? 0.1 * Math.sin(i / 6) : 1 + 0.1 * Math.sin(i / 6)))
-      if (previewAdtype === 'causal') return x.map((i) => Math.sin(i / 7) + (i > 30 && i < 50 ? (i - 30) * 0.04 : 0))
-      return x.map((i) => Math.sin(i / 5) + (i === 30 ? 2 : 0) + (i === 55 ? -1.5 : 0))
-    })()
+    const previewPattern = previewFault?.pattern ?? previewAdtype
+    const preview = buildPreviewSeries(previewPattern)
+    const showFaultShape = previewPattern !== 'none'
+    const previewTitle = previewFault ? `${previewFault.name}预览` : showFaultShape ? `${patternPreviewLabel(previewPattern)}示例` : '数据波动预览'
 
     return (
-      <div className="space-y-3 min-h-[560px]">
-        <div className="bg-white rounded-lg shadow py-3 text-center text-slate-500">
-          👈 请先在左侧准备数据集
+      <div className="min-h-[560px] space-y-3">
+        <div className="content-card flex items-center justify-between">
+          <div>
+            <p className="section-kicker">Dataset Preview</p>
+            <h3 className="mt-1 text-base font-semibold text-slate-900">等待数据集</h3>
+          </div>
+          <span className="status-badge border-slate-200 bg-slate-50 text-slate-600">Idle</span>
         </div>
-        <div className="glass-panel p-3">
+        <div className="glass-panel p-4">
           <div className="flex items-center justify-between mb-1">
-            <h3 className="section-title mb-0 text-sm">{previewAdtype === 'spike' ? 'Spike 示例' : previewAdtype === 'step' ? 'Step 示例' : 'Causal 示例'}</h3>
-            <span className="text-[11px] text-slate-500">预览</span>
+            <h3 className="section-title mb-0 text-sm">
+              <LineChart className="h-4 w-4 text-blue-600" />
+              {previewTitle}
+            </h3>
+            <span className="text-[11px] text-slate-500">
+              {previewFault ? `${previewFault.category} · ${patternPreviewLabel(previewPattern)}` : '预览'}
+            </span>
           </div>
           <Plot
             data={[
-              { x, y: demo, mode: 'lines', line: { color: '#10a37f' } },
+              {
+                x: preview.x,
+                y: preview.y,
+                mode: 'lines',
+                name: previewFault?.name ?? patternPreviewLabel(previewPattern),
+                line: { color: '#0f766e', width: 2 },
+              },
             ]}
             layout={{
               height: 360,
               margin: { t: 20, b: 30, l: 40, r: 20 },
               xaxis: { title: 'Time', gridcolor: '#e5e7eb' },
               yaxis: { title: 'Value', gridcolor: '#e5e7eb' },
+              shapes: showFaultShape ? [
+                {
+                  type: 'rect',
+                  xref: 'x',
+                  yref: 'paper',
+                  x0: preview.start,
+                  x1: preview.end,
+                  y0: 0,
+                  y1: 1,
+                  fillcolor: '#f97316',
+                  opacity: 0.12,
+                  line: { width: 0 },
+                },
+              ] : [],
+              annotations: previewFault ? [
+                {
+                  x: preview.start,
+                  y: 1,
+                  yref: 'paper',
+                  text: previewFault.effect,
+                  showarrow: false,
+                  xanchor: 'left',
+                  yanchor: 'bottom',
+                  font: { size: 11, color: '#475569' },
+                },
+              ] : [],
               paper_bgcolor: 'rgba(0,0,0,0)',
               plot_bgcolor: 'rgba(0,0,0,0)',
             }}
@@ -99,7 +175,11 @@ export default function DataView() {
     )
   }
 
-  const varNames = getVarNames(session.dataset_name, sample.num_vars)
+  const varNames = getVariableNames(
+    session.dataset_name,
+    sample.num_vars,
+    session.fault_id ?? String(session.options_summary?.fault_id ?? ''),
+  )
   const timeSteps = Array.from({ length: sample.T }, (_, i) => i)
 
   // ===== 正常 vs 异常对比 =====
@@ -145,33 +225,16 @@ export default function DataView() {
 
   // ===== 异常热力图 =====
   // label shape: T x num_vars，画图时转置 → variables × timesteps
-  const labelHeatmap = {
-    z: Array.from({ length: sample.num_vars }, (_, v) => sample.label.map((row) => row[v])),
-    x: timeSteps,
-    y: varNames,
-    type: 'heatmap',
-    colorscale: 'Blues',
-    showscale: true,
-    colorbar: { title: '是否异常' },
-  }
-
-  // ===== 真实因果矩阵 =====
-  const causalHeatmap = trueCausal
-    ? {
-        z: trueCausal,
-        x: varNames,
-        y: varNames,
-        type: 'heatmap',
-        colorscale: 'Blues',
-        showscale: true,
-      }
-    : null
+  const labelMatrix = Array.from({ length: sample.num_vars }, (_, v) => sample.label.map((row) => row[v]))
 
   return (
     <div className="space-y-6">
-      <div className="bg-white rounded-lg shadow p-4">
+      <div className="content-card">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="section-title m-0">📊 测试集样本可视化 - {session.dataset_name.toUpperCase()}</h3>
+          <h3 className="section-title m-0">
+            <BarChart3 className="h-4 w-4 text-blue-600" />
+            测试集样本可视化 - {session.dataset_name.toUpperCase()}
+          </h3>
           <span className="text-xs text-slate-500">
             共 {testSize} 个测试样本{sample.from_test_set ? '（来自模型测试集）' : '（原始数据）'}
           </span>
@@ -192,12 +255,15 @@ export default function DataView() {
 
       <div className="glass-panel p-4 space-y-3">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="section-title mb-0">👁️‍🗨️ 一键可视化异常变化</h3>
+          <h3 className="section-title mb-0">
+            <Search className="h-4 w-4 text-blue-600" />
+            异常变化对比
+          </h3>
           <button
-            className="px-3 py-1.5 text-sm rounded bg-brand-600 text-white hover:bg-brand-700"
+            className="btn-secondary px-3 py-1.5"
             onClick={() => setShowCompare((v) => !v)}
           >
-            {showCompare ? '收起对比图' : '🔍 显示正常 vs 异常对比'}
+            {showCompare ? '收起对比图' : '显示对比图'}
           </button>
         </div>
 
@@ -257,20 +323,25 @@ export default function DataView() {
         </div>
       </div>
 
-      <div className="bg-white rounded-lg shadow p-4">
+      <div className="content-card">
         <h3 className="section-title">异常位置热力图（1 = 异常）</h3>
-        <Plot
-          data={[labelHeatmap as any]}
-          layout={{ height: 300, xaxis: { title: '时间步' }, yaxis: { title: '变量' }, margin: { t: 30, b: 40, l: 80, r: 30 } }}
-          style={{ width: '100%' }}
-          useResizeHandler
-          config={{ responsive: true, displayModeBar: false }}
+        <MatrixHeatmap
+          z={labelMatrix}
+          xLabels={timeSteps.map(String)}
+          yLabels={varNames}
+          xAxisTitle="时间步"
+          yAxisTitle="变量"
+          height={260}
+          domain={[0, 1]}
         />
       </div>
 
-      {causalHeatmap && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h3 className="section-title">🔗 真实因果矩阵</h3>
+      {trueCausal && (
+        <div className="content-card">
+          <h3 className="section-title">
+            <GitBranch className="h-4 w-4 text-blue-600" />
+            真实因果矩阵
+          </h3>
           {session.dataset_name === 'lotka_volterra' && (
             <p className="text-xs text-slate-500 mb-2">
               <b>生物解释</b>：前一半变量为<b>猎物 (Prey)</b>，后一半为<b>捕食者 (Predator)</b>，存在明显的捕食者-猎物因果交互。
@@ -281,12 +352,18 @@ export default function DataView() {
               <b>混沌系统</b>：环形因果系统，每个变量受前两个变量影响，同时影响后两个变量。
             </p>
           )}
-          <Plot
-            data={[causalHeatmap as any]}
-            layout={{ height: 320, xaxis: { title: '被影响变量' }, yaxis: { title: '影响变量', autorange: 'reversed' }, margin: { t: 30, b: 40, l: 80, r: 30 } }}
-            style={{ width: '100%' }}
-            useResizeHandler
-            config={{ responsive: true, displayModeBar: false }}
+          <p className="mb-2 text-xs text-slate-500">
+            行 = 被影响变量，列 = 影响变量；深色表示存在更强连接。
+          </p>
+          <MatrixHeatmap
+            z={trueCausal}
+            xLabels={varNames}
+            yLabels={varNames}
+            xAxisTitle="影响变量"
+            yAxisTitle="被影响变量"
+            height={300}
+            domain={[0, Math.max(1, ...trueCausal.flat())]}
+            showValues={sample.num_vars <= 12}
           />
         </div>
       )}

@@ -20,6 +20,27 @@ class SWaT:
         self.data_dir = options['data_dir']
         self.window_size = options['window_size']
         self.shuffle = options['shuffle']
+        self.fault_id = options.get('fault_id')
+
+    def _load_fault_events(self):
+        events_file = os.path.join(self.data_dir, 'fault_events.csv')
+        if not os.path.exists(events_file):
+            raise FileNotFoundError(
+                "SWaT fault_events.csv is missing. Create it from List_of_attacks_Final.xlsx first."
+            )
+        events = pd.read_csv(events_file)
+        events = events.dropna(subset=['start_time', 'end_time', 'attack_points', 'fault_id']).copy()
+        events['start_time'] = pd.to_datetime(events['start_time'])
+        events['end_time'] = pd.to_datetime(events['end_time'])
+        if self.fault_id:
+            events = events.loc[events['fault_id'] == self.fault_id].copy()
+        if events.empty:
+            raise ValueError(f"No SWaT attack events mapped to fault_id={self.fault_id!r}")
+        return events
+
+    @staticmethod
+    def _normalise_attack_point(point):
+        return str(point).replace('-', '').strip().upper()
 
     def generate_example(self):
         """
@@ -29,45 +50,31 @@ class SWaT:
         the processed arrays in self.data_dict.
         """
         # ----------------------------
-        # Load Attack Label Data
-        # ----------------------------
-        label_file = os.path.join(self.data_dir, 'List_of_attacks_Final.xlsx')
-        df_label = pd.read_excel(label_file, header=0, index_col=0)
-
-
-        # ----------------------------
         # Load Normal and Abnormal Data
         # ----------------------------
         normal_csv = os.path.join(self.data_dir, 'SWaT_Normal.csv')
         abnormal_csv = os.path.join(self.data_dir, 'SWaT_Abnormal.csv')
+        normal_excel = os.path.join(self.data_dir, 'SWaT_Dataset_Normal_v1.xlsx')
+        abnormal_excel = os.path.join(self.data_dir, 'SWaT_Dataset_Attack_v0.xlsx')
 
         if os.path.exists(normal_csv) and os.path.exists(abnormal_csv):
             df_normal = pd.read_csv(normal_csv, header=0, index_col=0)
             df_abnormal = pd.read_csv(abnormal_csv, header=0, index_col=0)
         else:
-            normal_excel = os.path.join(self.data_dir, 'SWaT_Dataset_Normal_v1.xlsx')
-            abnormal_excel = os.path.join(self.data_dir, 'SWaT_Dataset_Attack_v0.xlsx')
+            if not (os.path.exists(normal_excel) and os.path.exists(abnormal_excel)):
+                raise FileNotFoundError(
+                    "SWaT raw time-series files are required for scenario-closed-loop generation. "
+                    "Place SWaT_Normal.csv/SWaT_Abnormal.csv or the original Excel files in datasets/swat."
+                )
             df_normal = pd.read_excel(normal_excel, header=1)
             df_normal.to_csv(normal_csv)
             df_abnormal = pd.read_excel(abnormal_excel, header=1)
             df_abnormal.to_csv(abnormal_csv)
 
         # ----------------------------
-        # Clean Label Data
+        # Load mapped fault events
         # ----------------------------
-        # Drop rows where 'Start Time' or 'End Time' is missing
-        df_label_clean = df_label.dropna(subset=['Start Time', 'End Time'], how='any').copy()
-        # Remove columns not needed for further processing
-        df_label_clean.drop(columns=['Start State', 'Attack', 'Expected Impact or attacker intent',
-                                      'Unexpected Outcome', 'Actual Change'], inplace=True)
-        # Convert 'Start Time' and 'End Time' to datetime for processing
-        df_label_clean['Start Time'] = pd.to_datetime(df_label_clean['Start Time'])
-        # Construct 'Adjusted End Time' by combining the date from 'Start Time' with the time from 'End Time'
-        df_label_clean['Adjusted End Time'] = df_label_clean.apply(
-            lambda row: pd.to_datetime(
-            row['Start Time'].strftime('%Y-%m-%d') + ' ' + row['End Time'].strftime('%H:%M:%S')), axis=1)
-        # Save cleaned label data to CSV
-        df_label_clean.to_csv(os.path.join(self.data_dir, 'SWaT_label.csv'))
+        fault_events = self._load_fault_events()
 
         # ----------------------------
         # Clean Normal Data
@@ -98,7 +105,7 @@ class SWaT:
         # Create a mapping from cleaned column names (without leading spaces) to their index
         col_dic = {}
         for i in df_abnormal.columns.values[1:-2]:
-            col_dic[i.lstrip()] = len(col_dic)
+            col_dic[self._normalise_attack_point(i)] = len(col_dic)
 
         # ----------------------------
         # Process Each Attack Event for Abnormal Data
@@ -106,14 +113,17 @@ class SWaT:
         test_x_lst = []
         test_label_lst = []
 
-        for i in range(len(df_label_clean)):
-            # Define the lower and upper time bounds for the attack event
-            lower = df_label_clean.iloc[i]['Start Time']
-            upper = df_label_clean.iloc[i]['Adjusted End Time']
-            # Extract the list of attack points (column names) from the label data
-            attack_lst = df_label_clean.iloc[i]['Attack Point'].split(",")
-            # Map attack points to their corresponding column indices
-            attack_lst_ind = [col_dic[j.replace('-', '').lstrip().upper()] for j in attack_lst]
+        for _, event in fault_events.iterrows():
+            lower = event['start_time']
+            upper = event['end_time']
+            attack_lst = [
+                self._normalise_attack_point(point)
+                for point in str(event['attack_points']).replace(',', '|').split('|')
+                if str(point).strip()
+            ]
+            attack_lst_ind = [col_dic[p] for p in attack_lst if p in col_dic]
+            if not attack_lst_ind:
+                continue
             # Find indices in abnormal data where the timestamp is within the attack interval and marked as 'Attack'
             index_lst = np.array(df_abnormal.loc[
                 (df_abnormal['Adjusted Timestamp'] >= lower) &
@@ -125,8 +135,10 @@ class SWaT:
                 for j in attack_lst_ind:
                     labels[index_lst, j] = 1
                 # Define the window for the example based on the minimum index in the attack interval
-                start_idx = int(min(index_lst) - 2 * 10 * self.window_size)
-                end_idx = int(min(index_lst) + 1 * 10 * self.window_size)
+                start_idx = max(0, int(min(index_lst) - 2 * 10 * self.window_size))
+                end_idx = min(len(df_abnormal), int(min(index_lst) + 1 * 10 * self.window_size))
+                if end_idx <= start_idx:
+                    continue
                 # Slice the abnormal data and label arrays with a step of 10
                 test_x_lst.append(
                     df_abnormal.iloc[start_idx:end_idx:10, 1:-2].values
@@ -134,6 +146,12 @@ class SWaT:
                 test_label_lst.append(
                     labels[start_idx:end_idx:10]
                 )
+
+        if not test_x_lst:
+            raise ValueError(
+                f"No SWaT abnormal windows could be built for fault_id={self.fault_id!r}. "
+                "Check fault_events.csv and the raw SWaT attack timestamps."
+            )
 
         # ----------------------------
         # Process Normal Data: Split and Scale
@@ -144,6 +162,8 @@ class SWaT:
             for i in range(0, len(df_normal), 1000)
             if i + 1000 < len(df_normal)
         ]
+        if not x_n_list:
+            raise ValueError("No SWaT normal training windows could be built from the raw normal file.")
         # Initialize and fit the StandardScaler on the concatenated normal data segments
         scaler = StandardScaler()
         scaler.fit(np.concatenate(x_n_list, axis=0))

@@ -154,10 +154,12 @@ class AERCA(nn.Module):
         """训练模型。
 
         progress_callback: 可选的回调函数，签名 callback(info: dict)。
-        每个 epoch 结束时调用，info 包含:
-          { 'phase': 'training', 'epoch', 'total_epochs', 'train_loss',
-            'val_loss', 'best_val_loss', 'early_stopped': bool }
+        batch 级和 epoch 级都会推送进度，便于前端实时绘制 loss 曲线。
         """
+        def _raise_if_stopped():
+            if progress_callback is not None and getattr(progress_callback, "should_stop", lambda: False)():
+                raise InterruptedError("Training stopped by user.")
+
         if len(xs) == 1:
             xs_train = xs[:, :int(0.8 * len(xs[0]))]
             xs_val = xs[:, int(0.8 * len(xs[0])):]
@@ -167,16 +169,40 @@ class AERCA(nn.Module):
         best_val_loss = np.inf
         count = 0
         early_stopped = False
+        train_batches = max(1, len(xs_train))
+        val_batches = max(1, len(xs_val))
+        emit_every = max(1, train_batches // 20)
         for epoch in tqdm(range(self.epochs), desc=f'Epoch'):
+            _raise_if_stopped()
             count += 1
             epoch_loss = 0
             self.train()
-            for x in xs_train:
+            for batch_idx, x in enumerate(xs_train, start=1):
+                _raise_if_stopped()
                 self.optimizer.zero_grad()
                 loss = self._training_step(x)
-                epoch_loss += loss.item()
+                batch_loss = float(loss.item())
+                epoch_loss += batch_loss
                 loss.backward()
                 self.optimizer.step()
+                if (
+                    progress_callback is not None
+                    and (batch_idx == 1 or batch_idx == train_batches or batch_idx % emit_every == 0)
+                ):
+                    try:
+                        progress_callback({
+                            'phase': 'training_batch',
+                            'epoch': epoch + 1,
+                            'total_epochs': self.epochs,
+                            'batch': batch_idx,
+                            'total_batches': train_batches,
+                            'train_loss': float(epoch_loss / batch_idx),
+                            'batch_loss': batch_loss,
+                            'val_loss': None,
+                            'best_val_loss': None if np.isinf(best_val_loss) else float(best_val_loss),
+                        })
+                    except Exception as cb_err:  # noqa: BLE001
+                        logging.warning('progress_callback raised: %s', cb_err)
             logging.info('Epoch %s/%s', epoch + 1, self.epochs)
             logging.info('Epoch training loss: %s', epoch_loss)
             logging.info('-------------------')
@@ -184,6 +210,7 @@ class AERCA(nn.Module):
             self.eval()
             with torch.no_grad():
                 for x in xs_val:
+                    _raise_if_stopped()
                     loss = self._training_step(x)
                     epoch_val_loss += loss.item()
             logging.info('Epoch val loss: %s', epoch_val_loss)
@@ -200,8 +227,10 @@ class AERCA(nn.Module):
                         'phase': 'training',
                         'epoch': epoch + 1,
                         'total_epochs': self.epochs,
-                        'train_loss': float(epoch_loss),
-                        'val_loss': float(epoch_val_loss),
+                        'batch': train_batches,
+                        'total_batches': train_batches,
+                        'train_loss': float(epoch_loss / train_batches),
+                        'val_loss': float(epoch_val_loss / val_batches),
                         'best_val_loss': float(best_val_loss),
                         'early_stopped': False,
                     })
@@ -211,14 +240,17 @@ class AERCA(nn.Module):
                 print('Early stopping')
                 early_stopped = True
                 break
+            _raise_if_stopped()
         if progress_callback is not None and early_stopped:
             try:
                 progress_callback({
                     'phase': 'training',
                     'epoch': epoch + 1,
                     'total_epochs': self.epochs,
-                    'train_loss': float(epoch_loss),
-                    'val_loss': float(epoch_val_loss),
+                    'batch': train_batches,
+                    'total_batches': train_batches,
+                    'train_loss': float(epoch_loss / train_batches),
+                    'val_loss': float(epoch_val_loss / val_batches),
                     'best_val_loss': float(best_val_loss),
                     'early_stopped': True,
                 })
@@ -469,8 +501,21 @@ class AERCA(nn.Module):
             'detected': detected,
         }
 
-    def _testing_root_cause(self, xs, labels):
-        """严格按照原始 topk / topk_at_step 逻辑计算指标，并提取可视化所需的 Top-1"""
+    @staticmethod
+    def _dilate_time_labels(labels, tolerance):
+        if tolerance <= 0:
+            return labels
+        labels = np.asarray(labels)
+        relaxed = labels.copy()
+        for t in range(labels.shape[0]):
+            if np.any(labels[t] > 0):
+                start = max(0, t - tolerance)
+                end = min(labels.shape[0], t + tolerance + 1)
+                relaxed[start:end] = np.maximum(relaxed[start:end], labels[t])
+        return relaxed
+
+    def _testing_root_cause(self, xs, labels, time_tolerance=5):
+        """计算原始严格指标与时间容忍指标，并提取可视化所需的 Top-1。"""
         self.load_state_dict(torch.load(os.path.join(self.save_dir, f'{self.model_name}.pt'),
                                         map_location=self.device))
         self.eval()
@@ -499,19 +544,26 @@ class AERCA(nn.Module):
 
         k_all = []
         k_at_step_all = []
+        relaxed_k_all = []
+        relaxed_k_at_step_all = []
         predicted_root_causes = []
 
         for i in range(len(xs)):
             us_sample = us_sample_list[i]
             z_scores = (-(us_sample - self.us_mean_encoder) / self.us_std_encoder)
             label_sample = labels[i][self.window_size * 2:]
+            relaxed_label_sample = self._dilate_time_labels(label_sample, time_tolerance)
 
             # 严格使用原始函数计算指标
             k_lst = topk(z_scores, label_sample, us_all_z_score_pot)
             k_at_step = topk_at_step(z_scores, label_sample)
+            relaxed_k_lst = topk(z_scores, relaxed_label_sample, us_all_z_score_pot)
+            relaxed_k_at_step = topk_at_step(z_scores, relaxed_label_sample)
 
             k_all.append(k_lst)
             k_at_step_all.append(k_at_step)
+            relaxed_k_all.append(relaxed_k_lst)
+            relaxed_k_at_step_all.append(relaxed_k_at_step)
 
             # ====================== 按照 topk_at_step 逻辑提取 Top-1 用于可视化 ======================
             # topk_at_step 的核心是：对每个时间步独立排序变量
@@ -537,8 +589,12 @@ class AERCA(nn.Module):
         # 完全保持原始的指标计算和打印
         k_all = np.array(k_all).mean(axis=0)
         k_at_step_all = np.array(k_at_step_all).mean(axis=0)
+        relaxed_k_all = np.array(relaxed_k_all).mean(axis=0)
+        relaxed_k_at_step_all = np.array(relaxed_k_at_step_all).mean(axis=0)
         ac_at = [k_at_step_all[0], k_at_step_all[2], k_at_step_all[4], k_at_step_all[9]]
         ac_star_at = [k_all[0], k_all[9], k_all[99], k_all[499]]
+        relaxed_ac_at = [relaxed_k_at_step_all[0], relaxed_k_at_step_all[2], relaxed_k_at_step_all[4], relaxed_k_at_step_all[9]]
+        relaxed_ac_star_at = [relaxed_k_all[0], relaxed_k_all[9], relaxed_k_all[99], relaxed_k_all[499]]
 
         self._log_and_print('Root cause analysis AC@1: {:.5f}', ac_at[0])
         self._log_and_print('Root cause analysis AC@3: {:.5f}', ac_at[1])
@@ -551,12 +607,18 @@ class AERCA(nn.Module):
         self._log_and_print('Root cause analysis AC*@100: {:.5f}', ac_star_at[2])
         self._log_and_print('Root cause analysis AC*@500: {:.5f}', ac_star_at[3])
         self._log_and_print('Root cause analysis Avg*@500: {:.5f}', np.mean(k_all))
+        self._log_and_print('Root cause analysis relaxed AC*@10 (±{}): {:.5f}', time_tolerance, relaxed_ac_star_at[1])
 
         results = {
             'ac_at': ac_at,
             'ac_star_at': ac_star_at,
             'avg_at_10': float(np.mean(k_at_step_all)),
             'avg_star_at_500': float(np.mean(k_all)),
+            'time_tolerance': int(time_tolerance),
+            'relaxed_ac_at': relaxed_ac_at,
+            'relaxed_ac_star_at': relaxed_ac_star_at,
+            'relaxed_avg_at_10': float(np.mean(relaxed_k_at_step_all)),
+            'relaxed_avg_star_at_500': float(np.mean(relaxed_k_all)),
             'predicted_root_causes': predicted_root_causes,
             'num_vars': self.num_vars
         }

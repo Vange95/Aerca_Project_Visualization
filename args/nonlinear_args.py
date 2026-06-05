@@ -18,6 +18,7 @@ def create_arg_parser():
     parser.add_argument('--preprocessing_data', type=int, default=1, help='Flag for preprocessing data (default: 1)')
     parser.add_argument('--adlength', type=int, default=1, help='Ad length (default: 1)')
     parser.add_argument('--adtype', type=str, default='non_causal', help='Ad type (default: non_causal)')
+    parser.add_argument('--fault_id', type=str, default=None, help='Fault scenario id')
     parser.add_argument('--mul', type=int, default=10, help='Multiplier (default: 10)')
     parser.add_argument('--data_dir', type=str, default=os.path.join(os.getcwd(), 'datasets', 'nonlinear'), help='Data directory (default: ./datasets/nonlinear)')
     parser.add_argument('--causal_quantile', type=float, default=0.80, help='Causal quantile (default: 0.80)')

@@ -100,7 +100,7 @@ npm install
 
 ```bash
 # 终端 1：启动 FastAPI 后端（端口 8000）
-uvicorn backend.server:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn backend.server:app --host 0.0.0.0 --port 8000 --reload
 
 # 终端 2：启动 Vite 开发服务器（端口 5173，自动代理 /api 到 8000）
 cd frontend

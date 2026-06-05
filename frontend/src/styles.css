@@ -3,53 +3,65 @@
 @tailwind utilities;
 
 :root {
-  --bg: #f7f9fc;
-  --panel: rgba(255, 255, 255, 0.94);
-  --border: rgba(15, 23, 42, 0.06);
-  --shadow: 0 20px 60px rgba(15, 23, 42, 0.12);
-  --accent: #10a37f;
-  --accent-2: #2563eb;
+  --bg: #f6f8fb;
+  --panel: #ffffff;
+  --border: #d9e2ec;
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 8px 24px rgba(15, 23, 42, 0.04);
+  --accent: #2563eb;
+  --accent-2: #0f766e;
   --text: #0f172a;
-  --muted: #6b7280;
+  --muted: #64748b;
 }
 
 html, body, #root { height: 100%; }
 
 body {
-  font-family: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  background: radial-gradient(120% 120% at 20% 20%, #e7f1ff 0, #f8fbff 40%, #f5f3ff 100%);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
   color: var(--text);
 }
 
 .app-shell {
   min-height: 100vh;
-  background: radial-gradient(120% 120% at 20% 20%, #e7f1ff 0, #f8fbff 40%, #f5f3ff 100%);
+  background:
+    linear-gradient(#e8edf3 1px, transparent 1px),
+    linear-gradient(90deg, #e8edf3 1px, transparent 1px),
+    var(--bg);
+  background-size: 32px 32px;
 }
 
 .glass-panel {
   background: var(--panel);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
-  border-radius: 16px;
-  backdrop-filter: blur(10px);
+  border-radius: 8px;
 }
 
 .subtle-card {
-  background: linear-gradient(180deg, rgba(255,255,255,0.9) 0%, rgba(249,250,251,0.95) 100%);
-  border: 1px solid rgba(15, 23, 42, 0.05);
-  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .pill {
-  border-radius: 999px;
   padding: 2px 10px;
   font-weight: 600;
-  letter-spacing: 0.01em;
+  border-radius: 999px;
 }
 
-.metric-card { @apply bg-white rounded-xl shadow p-4 flex flex-col items-start border border-slate-100; }
-.metric-label { @apply text-xs text-slate-500 mb-1; }
-.metric-value { @apply text-2xl font-semibold text-slate-800; }
-.metric-hint  { @apply text-xs text-slate-400 mt-1; }
+.metric-card { @apply bg-white rounded-lg p-4 flex flex-col items-start border border-slate-200 shadow-sm; }
+.metric-label { @apply text-xs font-medium text-slate-500 mb-1; }
+.metric-value { @apply text-2xl font-semibold text-slate-900; }
+.metric-hint  { @apply text-xs text-slate-500 mt-1; }
 
-.section-title { @apply text-lg font-semibold text-slate-700 mb-3 flex items-center gap-2; }
+.section-title { @apply text-base font-semibold text-slate-900 mb-3 flex items-center gap-2; }
+.section-kicker { @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500; }
+.field-label { @apply block text-xs font-semibold text-slate-600 mb-1.5; }
+.field-control { @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100; }
+.btn-primary { @apply inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60; }
+.btn-secondary { @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60; }
+.btn-danger { @apply inline-flex items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60; }
+.btn-warning { @apply inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-60; }
+.status-badge { @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold; }
+.content-card { @apply rounded-lg border border-slate-200 bg-white p-4 shadow-sm; }
+.plot-frame { @apply rounded-lg border border-slate-200 bg-white p-3; }

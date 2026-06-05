@@ -1,23 +1,14 @@
 import { useMemo } from 'react'
 import Plot from './Plot'
+import MatrixHeatmap from './MatrixHeatmap'
 import { useAppStore } from '../store'
+import { getVariableNames } from '../domain/variableNames'
+import { GitBranch, Target } from 'lucide-react'
 
 const COLORS = [
   '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b',
   '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
 ]
-
-function getVarNames(dataset: string, n: number): string[] {
-  if (dataset === 'lotka_volterra') {
-    const p = Math.floor(n / 2)
-    return [
-      ...Array.from({ length: p }, (_, i) => `Prey_${i}`),
-      ...Array.from({ length: n - p }, (_, i) => `Predator_${i}`),
-    ]
-  }
-  if (dataset === 'lorenz96') return Array.from({ length: n }, (_, i) => `X_${i}`)
-  return Array.from({ length: n }, (_, i) => `var_${i}`)
-}
 
 function pct(v: number) {
   return `${(v * 100).toFixed(1)}%`
@@ -30,7 +21,11 @@ export default function ResultsView() {
   const results = useAppStore((s) => s.results)
 
   const varNames = useMemo(
-    () => (session ? getVarNames(session.dataset_name, session.num_vars) : []),
+    () => (session ? getVariableNames(
+      session.dataset_name,
+      session.num_vars,
+      session.fault_id ?? String(session.options_summary?.fault_id ?? ''),
+    ) : []),
     [session],
   )
 
@@ -38,6 +33,9 @@ export default function ResultsView() {
 
   const rc = results.root_cause
   const cd = results.causal_discovery
+  const timeTolerance = rc.time_tolerance ?? 5
+  const relaxedAcStarAt = rc.relaxed_ac_star_at ?? rc.ac_star_at
+  const relaxedAvgStarAt = rc.relaxed_avg_star_at_500 ?? rc.avg_star_at_500
 
   // 当前样本根因预测
   const predicted = rc.predicted_root_causes.find((p) => p.sample_idx === idx)
@@ -61,8 +59,8 @@ export default function ResultsView() {
           x1: t,
           y0: 0,
           y1: 1,
-          fillcolor: 'orange',
-          opacity: 0.2,
+          fillcolor: '#f59e0b',
+          opacity: 0.16,
           line: { width: 0 },
         })
         inAnomaly = false
@@ -77,8 +75,8 @@ export default function ResultsView() {
         x1: anomalyMask.length,
         y0: 0,
         y1: 1,
-        fillcolor: 'orange',
-        opacity: 0.2,
+        fillcolor: '#f59e0b',
+        opacity: 0.16,
         line: { width: 0 },
       })
     }
@@ -109,39 +107,73 @@ export default function ResultsView() {
     : []
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-lg shadow p-4 space-y-4">
-        <h3 className="section-title">🎯 根因分析效果一览</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="metric-card">
-            <span className="metric-label">变量定位准确率 (Top-5)</span>
-            <span className="metric-value">{pct(rc.ac_at[2] ?? 0)}</span>
+      <div className="space-y-6">
+      <div className="content-card space-y-4">
+        <div>
+          <h3 className="section-title mb-1">
+            <Target className="h-4 w-4 text-blue-600" />
+            根因分析效果
+          </h3>
+          <p className="text-xs leading-5 text-slate-500">
+            主指标关注根因变量是否找对；联合时间指标采用 ±{timeTolerance} tick 容忍，适合阶跃、归零、漂移这类持续故障。
+          </p>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">主指标：根因变量定位</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="metric-card">
+              <span className="metric-label">变量 Top-1</span>
+              <span className="metric-value">{pct(rc.ac_at[0] ?? 0)}</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-label">变量 Top-5</span>
+              <span className="metric-value">{pct(rc.ac_at[2] ?? 0)}</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-label">变量 Top-10 平均</span>
+              <span className="metric-value">{rc.avg_at_10.toFixed(3)}</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-label">预测根因变量</span>
+              <span className="metric-value text-xl">
+                {predicted ? varNames[predicted.root_cause_var_idx]?.replace(/\s*\((var|metric)_\d+\)\s*$/i, '') : '--'}
+              </span>
+            </div>
           </div>
-          <div className="metric-card">
-            <span className="metric-label">联合准确率 (Top-10)</span>
-            <span className="metric-value">{pct(rc.ac_star_at[1] ?? 0)}</span>
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">辅助指标：变量 + 时间联合定位</p>
+            <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600">时间容忍 ±{timeTolerance} tick</span>
           </div>
-          <div className="metric-card">
-            <span className="metric-label">Top-1 准确率</span>
-            <span className="metric-value">{pct(rc.ac_at[0] ?? 0)}</span>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="metric-card bg-white">
+              <span className="metric-label">宽松联合 Top-10</span>
+              <span className="metric-value">{pct(relaxedAcStarAt[1] ?? 0)}</span>
+            </div>
+            <div className="metric-card bg-white">
+              <span className="metric-label">宽松联合 Top-100</span>
+              <span className="metric-value">{pct(relaxedAcStarAt[2] ?? 0)}</span>
+            </div>
+            <div className="metric-card bg-white">
+              <span className="metric-label">原始严格 Top-10</span>
+              <span className="metric-value text-slate-700">{pct(rc.ac_star_at[1] ?? 0)}</span>
+            </div>
+            <div className="metric-card bg-white">
+              <span className="metric-label">宽松联合均值</span>
+              <span className="metric-value text-slate-700">{relaxedAvgStarAt.toFixed(3)}</span>
+            </div>
           </div>
-          <div className="metric-card">
-            <span className="metric-label">Top-10 平均</span>
-            <span className="metric-value">{rc.avg_at_10.toFixed(3)}</span>
-          </div>
-          <div className="metric-card">
-            <span className="metric-label">严格联合 Top-1</span>
-            <span className="metric-value">{pct(rc.ac_star_at[0] ?? 0)}</span>
-          </div>
-          <div className="metric-card">
-            <span className="metric-label">严格联合 Top-100</span>
-            <span className="metric-value">{pct(rc.ac_star_at[2] ?? 0)}</span>
-          </div>
+          <p className="mt-2 text-[11px] leading-5 text-slate-500">
+            原始严格指标要求变量和精确时间点完全命中；宽松指标允许预测时间与真实故障段相差 {timeTolerance} tick 以内。
+          </p>
         </div>
       </div>
 
       {sample && predicted && (
-        <div className="bg-white rounded-lg shadow p-4">
+        <div className="content-card">
           <h3 className="section-title">异常时序 + 根因高亮（样本 #{idx}）</h3>
           <p className="text-xs text-slate-500 mb-2">
             <span className="inline-block w-3 h-3 bg-orange-300 mr-1 align-middle" />
@@ -167,8 +199,11 @@ export default function ResultsView() {
       )}
 
       {cd && (
-        <div className="bg-white rounded-lg shadow p-4 space-y-4">
-          <h3 className="section-title">🔗 因果发现结果</h3>
+        <div className="content-card space-y-4">
+          <h3 className="section-title">
+            <GitBranch className="h-4 w-4 text-blue-600" />
+            因果发现结果
+          </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="metric-card">
               <span className="metric-label">F1 分数</span>
@@ -188,41 +223,31 @@ export default function ResultsView() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-5">
             <div>
               <p className="text-sm font-medium text-slate-700 mb-1">真实因果矩阵</p>
-              <Plot
-                data={[
-                  {
-                    z: cd.true_causal_matrix,
-                    x: varNames,
-                    y: varNames,
-                    type: 'heatmap',
-                    colorscale: 'Blues',
-                  } as any,
-                ]}
-                layout={{ height: 400, yaxis: { autorange: 'reversed' }, margin: { t: 30, b: 50, l: 80, r: 30 } }}
-                style={{ width: '100%' }}
-                useResizeHandler
-                config={{ responsive: true, displayModeBar: false }}
+              <MatrixHeatmap
+                z={cd.true_causal_matrix}
+                xLabels={varNames}
+                yLabels={varNames}
+                xAxisTitle="影响变量"
+                yAxisTitle="被影响变量"
+                height={420}
+                domain={[0, Math.max(1, ...cd.true_causal_matrix.flat())]}
+                showValues={session.num_vars <= 12}
               />
             </div>
             <div>
               <p className="text-sm font-medium text-slate-700 mb-1">模型预测因果矩阵</p>
-              <Plot
-                data={[
-                  {
-                    z: cd.predicted_causal_matrix,
-                    x: varNames,
-                    y: varNames,
-                    type: 'heatmap',
-                    colorscale: 'Blues',
-                  } as any,
-                ]}
-                layout={{ height: 400, yaxis: { autorange: 'reversed' }, margin: { t: 30, b: 50, l: 80, r: 30 } }}
-                style={{ width: '100%' }}
-                useResizeHandler
-                config={{ responsive: true, displayModeBar: false }}
+              <MatrixHeatmap
+                z={cd.predicted_causal_matrix}
+                xLabels={varNames}
+                yLabels={varNames}
+                xAxisTitle="影响变量"
+                yAxisTitle="被影响变量"
+                height={420}
+                domain={[0, Math.max(1, ...cd.predicted_causal_matrix.flat())]}
+                showValues={session.num_vars <= 12}
               />
             </div>
           </div>

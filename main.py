@@ -86,6 +86,16 @@ def main(argv, progress_callback=None, data_class=None):
     utils.set_seed(options['seed'])
     print('Set seed: {}'.format(options['seed']))
 
+    def _should_stop():
+        return bool(
+            progress_callback is not None
+            and getattr(progress_callback, "should_stop", lambda: False)()
+        )
+
+    def _raise_if_stopped():
+        if _should_stop():
+            raise InterruptedError("Training stopped by user.")
+
     # Dataset
     if data_class is None:
         data_class = mapping["dataset_class"](options)
@@ -128,6 +138,7 @@ def main(argv, progress_callback=None, data_class=None):
 
     # Training
     if options['training_aerca']:
+        _raise_if_stopped()
         if mapping["use_slice"]:
             training_data = data_class.data_dict['x_n_list'][:options['training_size']]
         else:
@@ -135,6 +146,7 @@ def main(argv, progress_callback=None, data_class=None):
         print('Start training AERCA model...')
         aerca_model._training(training_data, progress_callback=progress_callback)
         print('Done training')
+        _raise_if_stopped()
 
     def _emit(phase, message=None):
         if progress_callback is not None:
@@ -144,6 +156,7 @@ def main(argv, progress_callback=None, data_class=None):
                 pass
 
     # Causal discovery test
+    _raise_if_stopped()
     _emit('causal_discovery_start', 'Causal discovery testing...')
     if mapping["use_slice"]:
         test_causal = data_class.data_dict['x_n_list'][options['training_size']:]
@@ -156,6 +169,7 @@ def main(argv, progress_callback=None, data_class=None):
     _emit('causal_discovery_done', 'Causal discovery complete.')
 
     # Root cause analysis
+    _raise_if_stopped()
     if mapping["use_slice"]:
         test_x_ab = data_class.data_dict['x_ab_list'][options['training_size']:]
         test_label = data_class.data_dict['label_list'][options['training_size']:]
@@ -165,6 +179,7 @@ def main(argv, progress_callback=None, data_class=None):
 
     _emit('root_cause_start', 'Root cause analysis...')
     print('Start testing AERCA model for root cause analysis...')
+    _raise_if_stopped()
     root_cause_results = aerca_model._testing_root_cause(test_x_ab, test_label)
     print('Done testing for root cause analysis')
     _emit('root_cause_done', 'Root cause analysis complete.')

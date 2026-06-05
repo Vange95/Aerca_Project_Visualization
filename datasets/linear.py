@@ -13,12 +13,28 @@ class Linear:
         self.t = options['T']
         self.mul = options.get('mul', 4.5)
         self.a = options['a'] if options['a'] is not None else self._generate_random_coefficients()
-        self.adlength = options.get('adlength', 60)
+        self.adlength = int(max(1, options.get('adlength', 60)))
         self.adtype = options.get('adtype', 'spike')
+        self.fault_id = options.get('fault_id')
         self.data_dir = options['data_dir']
         self.dependent_features = options.get('dependent_features', 0)
 
-        self.supported_adtypes = ['spike', 'step', 'causal']
+        self.fault_specs = {
+            'equipment_spike': {'adtype': 'step_up', 'affected_vars': [1, 2]},
+            'power_loss': {'adtype': 'drop_to_zero', 'affected_vars': [0, 1, 2, 3]},
+            'sensor_drift': {'adtype': 'gradual_drift', 'affected_vars': [2]},
+            'signal_loss': {'adtype': 'signal_zero', 'affected_vars': [3]},
+            'actuator_stuck': {'adtype': 'stuck_value', 'affected_vars': [1]},
+            'pressure_drop': {'adtype': 'step_down', 'affected_vars': [0, 1]},
+        }
+        if self.fault_id in self.fault_specs:
+            self.adtype = self.fault_specs[self.fault_id]['adtype']
+
+        self.supported_adtypes = [
+            'spike', 'step', 'causal',
+            'step_up', 'step_down', 'drop_to_zero', 'signal_zero',
+            'gradual_drift', 'stuck_value',
+        ]
 
         if self.adtype not in self.supported_adtypes:
             print(f"Warning: adtype '{self.adtype}' not supported. Using 'spike' instead.")
@@ -57,12 +73,16 @@ class Linear:
             x_n_list[i] = np.stack((x, w, y, z), axis=-1)
 
             # ====================== 生成异常（最终稳定版） ======================
-            start = np.random.randint(int(0.2 * self.t), int(0.8 * self.t - self.adlength))
-            t_p = np.arange(start, start + self.adlength)
-            end = start + 30
-            # 安全选择受影响的变量（1~3个）
-            num_features = np.random.randint(1, 4)
-            feature_p = np.random.choice(4, size=num_features, replace=False)
+            effective_adlength = min(self.adlength, max(1, int(self.t * 0.35)))
+            start_low = max(0, int(0.2 * self.t))
+            start_high = max(start_low + 1, int(0.8 * self.t) - effective_adlength)
+            start = np.random.randint(start_low, start_high)
+            t_p = np.arange(start, min(self.t, start + effective_adlength))
+            if self.fault_id in self.fault_specs:
+                feature_p = np.array(self.fault_specs[self.fault_id]['affected_vars'], dtype=int)
+            else:
+                num_features = np.random.randint(1, 4)
+                feature_p = np.random.choice(4, size=num_features, replace=False)
 
             temp_label = np.zeros((self.t, 4))
             temp_label[np.ix_(t_p, feature_p)] = 1
@@ -84,20 +104,64 @@ class Linear:
                     elif f == 3:
                         z_ab[t_p] += amp
 
-            elif self.adtype == 'step':
-                # Step：从异常开始位置一直持续到序列结束
+            elif self.adtype in ('step', 'step_up'):
                 step_value = self.mul * 2.0
                 for f in feature_p:
                     if f == 0:
-                        x_ab[start:end] += step_value
+                        x_ab[t_p] += step_value
                     elif f == 1:
-                        w_ab[start:end] += step_value
+                        w_ab[t_p] += step_value
                     elif f == 2:
-                        y_ab[start:end] += step_value
+                        y_ab[t_p] += step_value
                     elif f == 3:
-                        z_ab[start:end] += step_value
+                        z_ab[t_p] += step_value
 
+            elif self.adtype == 'step_down':
+                step_value = self.mul * 2.0
+                for f in feature_p:
+                    if f == 0:
+                        x_ab[t_p] -= step_value
+                    elif f == 1:
+                        w_ab[t_p] -= step_value
+                    elif f == 2:
+                        y_ab[t_p] -= step_value
+                    elif f == 3:
+                        z_ab[t_p] -= step_value
 
+            elif self.adtype in ('drop_to_zero', 'signal_zero'):
+                for f in feature_p:
+                    if f == 0:
+                        x_ab[t_p] = 0.0
+                    elif f == 1:
+                        w_ab[t_p] = 0.0
+                    elif f == 2:
+                        y_ab[t_p] = 0.0
+                    elif f == 3:
+                        z_ab[t_p] = 0.0
+
+            elif self.adtype == 'gradual_drift':
+                drift = np.linspace(0.0, self.mul * 2.0, len(t_p))
+                for f in feature_p:
+                    if f == 0:
+                        x_ab[t_p] += drift
+                    elif f == 1:
+                        w_ab[t_p] += drift
+                    elif f == 2:
+                        y_ab[t_p] += drift
+                    elif f == 3:
+                        z_ab[t_p] += drift
+
+            elif self.adtype == 'stuck_value':
+                hold_t = max(0, start - 1)
+                for f in feature_p:
+                    if f == 0:
+                        x_ab[t_p] = x_ab[hold_t]
+                    elif f == 1:
+                        w_ab[t_p] = w_ab[hold_t]
+                    elif f == 2:
+                        y_ab[t_p] = y_ab[hold_t]
+                    elif f == 3:
+                        z_ab[t_p] = z_ab[hold_t]
 
             elif self.adtype == 'causal':
                 b = self.a * 4.8

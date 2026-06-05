@@ -2,12 +2,66 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Plot from './Plot'
 import { useAppStore } from '../store'
-import { startStream, stopStream, injectAnomaly, openStreamWS } from '../api'
-import type { StreamTick } from '../types'
+import { startStream, stopStream, injectAnomaly, openStreamWS, listFaultScenarios } from '../api'
+import type { FaultScenario, StreamTick } from '../types'
+import { formatVariableList, getVariableNames } from '../domain/variableNames'
+import { Activity, ChevronDown, ChevronUp, Loader2, Play, PlusCircle, Square } from 'lucide-react'
 
-const VAR_NAMES = ['x (var_0)', 'w (var_1)', 'y (var_2)', 'z (var_3)']
-const COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+const COLORS = ['#2563eb', '#ea580c', '#16a34a', '#dc2626', '#7c3aed', '#0891b2', '#be123c', '#4d7c0f']
+const STREAM_DATASET_LABELS: Record<string, string> = {
+  linear: '线性工业过程',
+  nonlinear: '非线性耦合过程',
+  swat: 'SWaT 水处理过程',
+}
+const SUPPORTED_STREAM_DATASETS = new Set(['linear', 'nonlinear', 'swat'])
 const WINDOW = 200
+
+type LatencyRecord = {
+  injT: number
+  detT: number | null
+  ticks: number | null
+  anomalyVars: number[] | null
+  anomalyAmp: number | null
+  faultId: string | null
+  faultName: string | null
+  faultEffect: string | null
+  faultRootCause: string | null
+  faultConfidence: number | null
+  inferenceMs: number | null
+  detectionSource: string | null
+}
+
+type DetectionRecord = {
+  detT: number
+  detectedVars: number[]
+  inferenceMs: number | null
+  detectionSource: string | null
+  matchedInjT: number | null
+}
+
+function fillArray<T>(count: number, value: T) {
+  return Array.from({ length: Math.max(1, count) }, () => value)
+}
+
+function formatInferenceMs(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return '推理耗时 --'
+  if (value < 0.1) return `推理 ${value.toFixed(3)}ms`
+  if (value < 10) return `推理 ${value.toFixed(2)}ms`
+  return `推理 ${value.toFixed(1)}ms`
+}
+
+function formatTickDelay(ticks: number | null) {
+  if (ticks === null) return '等待检测'
+  if (ticks === 0) return '同 tick 检出'
+  return `延迟 ${ticks} tick · ${ticks * 300}ms`
+}
+
+function formatDetectionSource(source: string | null) {
+  if (source === 'model+rule') return '模型+规则'
+  if (source === 'rule') return '规则兜底'
+  if (source === 'model') return '模型检测'
+  return '检测来源 --'
+}
 
 export default function StreamView() {
   const session = useAppStore((s) => s.session)
@@ -17,28 +71,62 @@ export default function StreamView() {
   const [buffer, setBuffer] = useState<number[][]>([])
   const [injectionGlobalTs, setInjectionGlobalTs] = useState<number[]>([])
   const [detectionGlobalTs, setDetectionGlobalTs] = useState<number[]>([])
-  const [currentScores, setCurrentScores] = useState<number[]>([0, 0, 0, 0])
-  const [currentDetected, setCurrentDetected] = useState<boolean[]>([false, false, false, false])
-  const [maxScores, setMaxScores] = useState<number[]>([0, 0, 0, 0])
-  const [varDetectionCounts, setVarDetectionCounts] = useState<number[]>([0, 0, 0, 0])
+  const [currentScores, setCurrentScores] = useState<number[]>([])
+  const [currentDetected, setCurrentDetected] = useState<boolean[]>([])
+  const [maxScores, setMaxScores] = useState<number[]>([])
+  const [varDetectionCounts, setVarDetectionCounts] = useState<number[]>([])
   const [isRunning, setIsRunning] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
   const [injecting, setInjecting] = useState(false)
-  const [latencyRecords, setLatencyRecords] = useState<Array<{
-    injT: number
-    detT: number | null
-    ticks: number | null
-    anomalyVars: number[] | null
-    anomalyAmp: number | null
-  }>>([])
+  const [latencyRecords, setLatencyRecords] = useState<LatencyRecord[]>([])
+  const [detectionRecords, setDetectionRecords] = useState<DetectionRecord[]>([])
+  const [faultScenarios, setFaultScenarios] = useState<FaultScenario[]>([])
+  const [showExtraAlarms, setShowExtraAlarms] = useState(false)
 
   const totalTicksRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const pendingInjectionsRef = useRef<number[]>([])
   const lastDetectionTRef = useRef<number>(-99)
 
+  const datasetName = session?.dataset_name ?? 'linear'
+  const numVars = Math.max(1, Number(session?.num_vars ?? buffer[0]?.length ?? 4))
+  const visibleVarCount = Math.min(numVars, 8)
+  const visibleVarIndexes = Array.from({ length: visibleVarCount }, (_, i) => i)
+  const sessionFaultId = String(session?.fault_id ?? session?.options_summary?.fault_id ?? '')
+  const selectedFaultId = sessionFaultId || faultScenarios[0]?.id || ''
+  const selectedFault = faultScenarios.find((f) => f.id === selectedFaultId)
+  const varNames = getVariableNames(datasetName, numVars, selectedFaultId)
+  const streamSupported = SUPPORTED_STREAM_DATASETS.has(datasetName)
+
   useEffect(() => {
     return () => { wsRef.current?.close() }
   }, [])
+
+  useEffect(() => {
+    wsRef.current?.close()
+    setIsRunning(false)
+    setIsStopping(false)
+    resetState()
+  }, [session?.session_id])
+
+  useEffect(() => {
+    if (!session || !streamSupported) {
+      setFaultScenarios([])
+      return
+    }
+
+    let cancelled = false
+    listFaultScenarios(datasetName)
+      .then((faults) => {
+        if (cancelled) return
+        setFaultScenarios(faults)
+      })
+      .catch((e: any) => {
+        if (!cancelled) setToast({ kind: 'error', text: `加载故障场景失败：${e.message}` })
+      })
+
+    return () => { cancelled = true }
+  }, [datasetName, session?.session_id, setToast, streamSupported])
 
   const openWS = useCallback(() => {
     if (!session) return
@@ -49,7 +137,11 @@ export default function StreamView() {
       try {
         const msg: StreamTick = JSON.parse(ev.data)
         if (msg.type === 'ping' || msg.type === 'hello') return
-        if (msg.type === 'stopped') { setIsRunning(false); return }
+        if (msg.type === 'stopped') {
+          setIsRunning(false)
+          setIsStopping(false)
+          return
+        }
         if (msg.type === 'tick' && msg.values && msg.t !== undefined) {
           totalTicksRef.current = msg.t + 1
           setBuffer((prev) => {
@@ -57,55 +149,90 @@ export default function StreamView() {
             return next.length > WINDOW ? next.slice(-WINDOW) : next
           })
           if (msg.is_anomaly_step) {
+            const fault = msg.fault
             setInjectionGlobalTs((prev) => [...prev, msg.t!])
             pendingInjectionsRef.current.push(msg.t!)
             setLatencyRecords((prev) => [...prev, {
               injT: msg.t!, detT: null, ticks: null,
               anomalyVars: msg.anomaly_vars ?? null,
               anomalyAmp: msg.anomaly_amp ?? null,
+              faultId: fault?.fault_id ?? fault?.id ?? null,
+              faultName: fault?.fault_name ?? fault?.name ?? null,
+              faultEffect: fault?.fault_effect ?? fault?.effect ?? null,
+              faultRootCause: fault?.fault_root_cause ?? fault?.root_cause ?? null,
+              faultConfidence: fault?.fault_confidence ?? fault?.confidence ?? null,
+              inferenceMs: null,
+              detectionSource: null,
             }])
           }
-          const s = msg.scores ?? [0, 0, 0, 0]
-          const d = msg.detected ?? [false, false, false, false]
-          setCurrentScores(s)
-          setCurrentDetected(d)
-          setMaxScores((prev) => prev.map((m, i) => Math.max(m, s[i])))
-          if (d.some(Boolean) && msg.t! - lastDetectionTRef.current > 2) {
+
+          const n = msg.values?.length ?? msg.scores?.length ?? numVars
+          const scores = Array.from({ length: n }, (_, i) => Number(msg.scores?.[i] ?? 0))
+          const detected = Array.from({ length: n }, (_, i) => Boolean(msg.detected?.[i]))
+          setCurrentScores(scores)
+          setCurrentDetected(detected)
+          setMaxScores((prev) => Array.from({ length: n }, (_, i) => Math.max(prev[i] ?? 0, scores[i] ?? 0)))
+
+          if (detected.some(Boolean) && msg.t! - lastDetectionTRef.current > 2) {
             lastDetectionTRef.current = msg.t!
             setDetectionGlobalTs((prev) => [...prev, msg.t!])
-            setVarDetectionCounts((prev) => prev.map((c, i) => c + (d[i] ? 1 : 0)))
-            // 匹配最早的待处理注入
+            setVarDetectionCounts((prev) => Array.from({ length: n }, (_, i) => (prev[i] ?? 0) + (detected[i] ? 1 : 0)))
+            const inferenceMs = typeof msg.inference_ms === 'number' ? msg.inference_ms : null
+            const detectionSource = msg.detection_source ?? null
+            const detectedVars = detected
+              .map((isDetected, i) => (isDetected ? i : -1))
+              .filter((i) => i >= 0)
+            let matchedInjT: number | null = null
+
             if (pendingInjectionsRef.current.length > 0) {
               const injT = pendingInjectionsRef.current[0]
               if (msg.t! >= injT) {
                 pendingInjectionsRef.current.shift()
+                matchedInjT = injT
                 const ticks = msg.t! - injT
                 setLatencyRecords((prev) => {
                   const idx = prev.findIndex((r) => r.injT === injT && r.detT === null)
                   if (idx === -1) return prev
                   const updated = [...prev]
-                  updated[idx] = { ...updated[idx], detT: msg.t!, ticks }
+                  updated[idx] = {
+                    ...updated[idx],
+                    detT: msg.t!,
+                    ticks,
+                    inferenceMs,
+                    detectionSource,
+                  }
                   return updated
                 })
               }
             }
+            setDetectionRecords((prev) => [...prev, {
+              detT: msg.t!,
+              detectedVars,
+              inferenceMs,
+              detectionSource,
+              matchedInjT,
+            }])
           }
         }
-      } catch { /* ignore */ }
+      } catch {
+        // ignore malformed stream messages
+      }
     }
     ws.onerror = () => setToast({ kind: 'error', text: '流式 WebSocket 连接出错' })
     ws.onclose = () => {}
-  }, [session, setToast])
+  }, [numVars, session, setToast])
 
   function resetState() {
     setBuffer([])
     setInjectionGlobalTs([])
     setDetectionGlobalTs([])
-    setCurrentScores([0, 0, 0, 0])
-    setCurrentDetected([false, false, false, false])
-    setMaxScores([0, 0, 0, 0])
-    setVarDetectionCounts([0, 0, 0, 0])
+    setCurrentScores(fillArray(numVars, 0))
+    setCurrentDetected(fillArray(numVars, false))
+    setMaxScores(fillArray(numVars, 0))
+    setVarDetectionCounts(fillArray(numVars, 0))
     setLatencyRecords([])
+    setDetectionRecords([])
+    setShowExtraAlarms(false)
     pendingInjectionsRef.current = []
     lastDetectionTRef.current = -99
     totalTicksRef.current = 0
@@ -118,6 +245,7 @@ export default function StreamView() {
       await startStream(session.session_id)
       openWS()
       setIsRunning(true)
+      setIsStopping(false)
     } catch (e: any) {
       setToast({ kind: 'error', text: `启动失败：${e.message}` })
     }
@@ -127,18 +255,19 @@ export default function StreamView() {
     if (!session) return
     try {
       await stopStream(session.session_id)
-      setIsRunning(false)
-      wsRef.current?.close()
+      setIsStopping(true)
+      setToast({ kind: 'info', text: '已请求停止生成，正在完成当前故障段检测...' })
     } catch (e: any) {
+      setIsStopping(false)
       setToast({ kind: 'error', text: `停止失败：${e.message}` })
     }
   }
 
   async function handleInject() {
-    if (!session || !isRunning) return
+    if (!session || !isRunning || isStopping || !selectedFaultId) return
     setInjecting(true)
     try {
-      await injectAnomaly(session.session_id)
+      await injectAnomaly(session.session_id, selectedFaultId)
     } catch (e: any) {
       setToast({ kind: 'error', text: `注入失败：${e.message}` })
     } finally {
@@ -146,9 +275,8 @@ export default function StreamView() {
     }
   }
 
-  if (!session || session.dataset_name !== 'linear' || runStatus !== 'done') return null
+  if (!session || !streamSupported || runStatus !== 'done') return null
 
-  // ── chart helpers ──────────────────────────────────────────────────────────
   const xAxis = buffer.map((_, i) => i)
   const currentT = totalTicksRef.current
   const bufLen = buffer.length
@@ -158,12 +286,16 @@ export default function StreamView() {
     return bufLen - 1 - offset
   }
 
-  const seriesTraces = VAR_NAMES.map((name, v) => ({
+  function formatVarList(vars: number[], faultId = selectedFaultId) {
+    return formatVariableList(datasetName, vars, numVars, faultId)
+  }
+
+  const seriesTraces = visibleVarIndexes.map((v) => ({
     x: xAxis,
-    y: buffer.map((row) => row[v]),
+    y: buffer.map((row) => row[v] ?? null),
     mode: 'lines',
-    name,
-    line: { color: COLORS[v], width: 1.5 },
+    name: varNames[v],
+    line: { color: COLORS[v % COLORS.length], width: 1.5 },
   }))
 
   const injLocalXs = injectionGlobalTs.map(globalToLocal).filter((x) => x >= 0 && x < bufLen)
@@ -171,13 +303,16 @@ export default function StreamView() {
 
   const injMarker = injLocalXs.length > 0 ? {
     x: injLocalXs,
-    y: injLocalXs.map((xi) => { const row = buffer[xi]; return row ? Math.max(...row) : 0 }),
+    y: injLocalXs.map((xi) => {
+      const row = buffer[xi]
+      const values = row ? visibleVarIndexes.map((v) => row[v]).filter((v) => typeof v === 'number') : []
+      return values.length > 0 ? Math.max(...values) : 0
+    }),
     mode: 'markers',
     name: '注入点 ▼',
     marker: { color: '#dc2626', size: 11, symbol: 'triangle-down' },
   } : null
 
-  // 检测标记：x = 报警时间步，y 固定用垂直线（shape）表示，marker 仅做图例占位
   const detShapes = detLocalXs.map((x) => ({
     type: 'line',
     x0: x, x1: x,
@@ -188,7 +323,7 @@ export default function StreamView() {
 
   const detMarker = detLocalXs.length > 0 ? {
     x: detLocalXs,
-    y: detLocalXs.map(() => null), // 不在图上绘制实际点，只用于图例
+    y: detLocalXs.map(() => null),
     mode: 'markers',
     name: '检测到 |',
     marker: { color: '#f97316', size: 10, symbol: 'line-ns' },
@@ -200,119 +335,188 @@ export default function StreamView() {
     ...(detMarker ? [detMarker] : []),
   ]
 
-  // summary stats
   const totalInjected = injectionGlobalTs.length
-  const totalDetected = detectionGlobalTs.length
-  const detectionRate = totalInjected > 0
-    ? Math.round((Math.min(totalDetected, totalInjected) / totalInjected) * 100)
-    : 0
+  const totalDetected = detectionRecords.length
+  const matchedDetected = latencyRecords.filter((r) => r.detT !== null).length
+  const extraAlarmRecords = detectionRecords.filter((r) => r.matchedInjT === null)
+  const extraAlarms = extraAlarmRecords.length
+  const latestMatched = [...latencyRecords].reverse().find((r) => r.detT !== null)
 
   return (
     <div className="glass-panel p-4 space-y-4">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <h3 className="section-title mb-0 text-sm">
-          🌊 实时流式异常检测
-          <span className="ml-2 text-xs font-normal text-slate-500">（Linear 数据集）</span>
+          <Activity className="h-4 w-4 text-blue-600" />
+          实时流式异常检测
+          <span className="ml-2 text-xs font-normal text-slate-500">（{STREAM_DATASET_LABELS[datasetName] ?? datasetName}）</span>
         </h3>
-        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium ${isRunning ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+        <span className={`status-badge ${isRunning ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>
           <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
-          {isRunning ? '运行中' : '已停止'}
+          {isStopping ? '收尾检测中' : isRunning ? '运行中' : '已停止'}
         </span>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="grid gap-3 lg:grid-cols-[auto_auto_1fr] lg:items-end">
         {!isRunning ? (
-          <button onClick={handleStart} className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-cyan-500 text-white text-sm font-semibold shadow hover:shadow-md transition">
-            ▶ 开始流式生成
+          <button onClick={handleStart} className="btn-primary">
+            <Play className="h-4 w-4" />
+            开始流式生成
           </button>
         ) : (
-          <button onClick={handleStop} className="px-4 py-2 rounded-lg bg-rose-500 text-white text-sm font-semibold shadow hover:bg-rose-600 transition">
-            ⏹ 停止生成
+          <button onClick={handleStop} disabled={isStopping} className="btn-danger">
+            {isStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+            {isStopping ? '检测收尾中' : '停止生成'}
           </button>
         )}
         <button
-          disabled={!isRunning}
+          disabled={!isRunning || isStopping || !selectedFaultId}
           onClick={handleInject}
-          className={`px-4 py-2 rounded-lg text-sm font-semibold shadow transition ${isRunning ? injecting ? 'bg-orange-400 text-white scale-95' : 'bg-orange-500 hover:bg-orange-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+          className={`${isRunning && !isStopping && selectedFaultId ? 'btn-warning' : 'btn-secondary'} ${injecting ? 'scale-[0.98]' : ''}`}
         >
-          💥 插入一个异常值
+          {injecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlusCircle className="h-4 w-4" />}
+          注入故障
         </button>
         {currentT > 0 && (
-          <span className="text-xs text-slate-500 ml-auto">已生成 {currentT} 个数据点</span>
+          <span className="pb-2 text-xs text-slate-500 lg:text-right">已生成 {currentT} 个数据点</span>
         )}
       </div>
 
-      {/* Summary banner (appears after at least 1 injection) */}
+      {selectedFault && (
+        <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-xs leading-5 text-slate-700">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-900">{selectedFault.name}</span>
+            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-blue-700">{selectedFault.category}</span>
+            <span className="rounded-full bg-white px-2 py-0.5 font-mono text-[10px] text-slate-500">{selectedFault.pattern}</span>
+          </div>
+          <p>信号表现：{selectedFault.effect}</p>
+          <p>影响测点：{formatVarList(selectedFault.affected_vars)}</p>
+          <p className="text-slate-500">预期根因：{selectedFault.root_cause}</p>
+        </div>
+      )}
+
       {totalInjected > 0 && (
-        <div className="flex items-center gap-4 px-4 py-2.5 rounded-lg bg-slate-50 border border-slate-200 text-sm">
+        <div className="flex flex-wrap items-center gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm">
           <span className="text-slate-700">
             注入 <b className="text-red-600">{totalInjected}</b> 次
           </span>
           <span className="text-slate-300">|</span>
           <span className="text-slate-700">
-            检测到 <b className="text-orange-600">{totalDetected}</b> 个异常 tick
+            匹配检出 <b className="text-emerald-600">{matchedDetected}</b> 次
           </span>
           <span className="text-slate-300">|</span>
           <span className="text-slate-700">
-            检出率约 <b className={detectionRate >= 50 ? 'text-emerald-600' : 'text-rose-600'}>{detectionRate}%</b>
+            额外报警 <b className={extraAlarms > 0 ? 'text-orange-600' : 'text-slate-600'}>{extraAlarms}</b> 次
           </span>
-          <span className="text-[11px] text-slate-400 ml-auto">
-            🔴 红色倒三角 = 注入点 &nbsp; 🟠 橙色虚线 = 模型检测线
+          <span className="ml-auto text-[11px] text-slate-500">
+            红色倒三角 = 注入点 · 橙色虚线 = 检测线
           </span>
         </div>
       )}
 
-      {/* Latency table */}
-      {latencyRecords.length > 0 && (
-        <div className="rounded-lg border border-slate-200 overflow-hidden text-xs">
-          <div className="bg-slate-50 px-3 py-1.5 font-medium text-slate-600 border-b border-slate-200">
-            ⏱ 注入 → 检测延迟记录
+      {latestMatched && (
+        <div className="grid gap-3 rounded-lg border border-emerald-200 bg-emerald-50/60 p-3 text-sm lg:grid-cols-[160px_1fr]">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-700">根因推断</p>
+            <p className="mt-1 font-semibold text-slate-900">{latestMatched.faultName ?? '未知故障'}</p>
+          </div>
+          <div className="space-y-1 text-xs leading-5 text-slate-700">
+            <p>第一步：模型在 t={latestMatched.detT} 检测到异常信号。</p>
+            <p>第二步：结合故障场景库推断为：{latestMatched.faultRootCause ?? '暂无根因解释'}</p>
+            {latestMatched.faultConfidence !== null && (
+              <p className="text-slate-500">规则置信度：{Math.round(latestMatched.faultConfidence * 100)}%</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {(latencyRecords.length > 0 || detectionRecords.length > 0) && (
+        <div className="overflow-hidden rounded-lg border border-slate-200 text-xs">
+          <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 font-semibold text-slate-700">
+            注入匹配与模型报警记录
           </div>
           <div className="divide-y divide-slate-100">
             {latencyRecords.map((r, i) => {
-              const ms = r.ticks !== null ? r.ticks * 300 : null
               return (
-                <div key={i} className="flex items-center gap-3 px-3 py-2">
+                <div key={i} className="flex flex-wrap items-center gap-3 px-3 py-2">
                   <span className="text-slate-400 w-14 shrink-0">第 {i + 1} 次</span>
-                  <span className="text-slate-500">
-                    注入 t={r.injT}
+                  <span className="min-w-0 text-slate-500">
+                    <span className="font-semibold text-slate-700">{r.faultName ?? '故障注入'}</span>
+                    <span className="ml-1">t={r.injT}</span>
                     {r.anomalyVars && (
                       <span className="ml-1.5 text-rose-500">
-                        （{r.anomalyVars.map((v) => ['x','w','y','z'][v]).join('+')} +{r.anomalyAmp?.toFixed(1)}）
+                        （影响 {formatVarList(r.anomalyVars, r.faultId ?? selectedFaultId)}）
                       </span>
+                    )}
+                    {r.faultEffect && (
+                      <span className="ml-2 hidden text-slate-400 md:inline">{r.faultEffect}</span>
                     )}
                   </span>
                   <span className="text-slate-300">→</span>
                   {r.detT !== null ? (
                     <>
                       <span className="text-slate-500">检测 t={r.detT}</span>
-                      <span className={`ml-auto font-semibold px-2 py-0.5 rounded ${
+                      <span className={`ml-auto shrink-0 rounded-full px-2 py-0.5 font-semibold ${
                         r.ticks === 0
                           ? 'bg-emerald-100 text-emerald-700'
                           : r.ticks! <= 2
                           ? 'bg-orange-100 text-orange-700'
                           : 'bg-rose-100 text-rose-700'
                       }`}>
-                        {r.ticks === 0
-                          ? '即时检测 (<300ms)'
-                          : `延迟 ${r.ticks} tick · ${ms}ms`}
+                        {formatDetectionSource(r.detectionSource)} · {formatInferenceMs(r.inferenceMs)} · {formatTickDelay(r.ticks)}
                       </span>
                     </>
                   ) : (
                     <span className="ml-auto text-slate-400 italic">
-                      {isRunning ? '等待检测中…' : '未检出'}
+                      {isRunning ? '等待匹配中...' : '该次注入未匹配报警'}
                     </span>
                   )}
                 </div>
               )
             })}
+            {extraAlarmRecords.length > 0 && (
+              <div className="bg-orange-50/60 px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => setShowExtraAlarms((v) => !v)}
+                  className="flex w-full items-center justify-between gap-3 text-left text-[11px] font-semibold text-orange-700"
+                >
+                  <span>
+                    额外报警 {extraAlarmRecords.length} 次
+                    <span className="ml-2 font-normal text-orange-600">
+                      默认收起：模型检测到异常，但没有匹配到本次故障注入
+                    </span>
+                  </span>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-orange-700">
+                    {showExtraAlarms ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                    {showExtraAlarms ? '收起' : '展开'}
+                  </span>
+                </button>
+              </div>
+            )}
+            {showExtraAlarms && extraAlarmRecords.map((r, i) => (
+              <div key={`extra-${r.detT}-${i}`} className="flex flex-wrap items-center gap-3 px-3 py-2">
+                <span className="text-orange-500 w-20 shrink-0">额外报警 {i + 1}</span>
+                <span className="font-semibold text-slate-700">检测 t={r.detT}</span>
+                {r.detectedVars.length > 0 && (
+                  <span className="text-orange-600">
+                    （检测变量 {formatVarList(r.detectedVars)}）
+                  </span>
+                )}
+                <span className="ml-auto shrink-0 rounded-full bg-orange-100 px-2 py-0.5 font-semibold text-orange-700">
+                  {formatDetectionSource(r.detectionSource)} · {formatInferenceMs(r.inferenceMs)} · 未匹配注入
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* Chart */}
+      {numVars > visibleVarCount && (
+        <p className="text-[11px] text-slate-500">
+          当前数据集共有 {numVars} 个变量，实时趋势图展示前 {visibleVarCount} 个变量；检测与根因记录仍按全量变量计算。
+        </p>
+      )}
+
       {buffer.length > 1 ? (
         <Plot
           data={allTraces}
@@ -332,13 +536,13 @@ export default function StreamView() {
         />
       ) : (
         <div className="h-24 flex items-center justify-center text-slate-400 text-sm border border-dashed border-slate-200 rounded-lg">
-          {isRunning ? '数据生成中，稍候…' : '点击「开始流式生成」启动'}
+          {isRunning ? '数据生成中，稍候...' : '点击「开始流式生成」启动'}
         </div>
       )}
 
-      {/* Per-variable score cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {VAR_NAMES.map((name, v) => {
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {visibleVarIndexes.map((v) => {
+          const name = varNames[v]
           const cur = currentScores[v] ?? 0
           const peak = maxScores[v] ?? 0
           const detCount = varDetectionCounts[v] ?? 0
@@ -346,13 +550,13 @@ export default function StreamView() {
           const everDetected = detCount > 0
           const pct = Math.min(100, Math.max(0, (peak / 6) * 100))
           return (
-            <div key={v} className={`rounded-lg p-3 border transition ${isNowDetected ? 'border-red-400 bg-red-50' : everDetected ? 'border-orange-300 bg-orange-50/60' : 'border-slate-200 bg-white/60'}`}>
+            <div key={v} className={`rounded-lg border p-3 transition ${isNowDetected ? 'border-red-300 bg-red-50' : everDetected ? 'border-amber-300 bg-amber-50/70' : 'border-slate-200 bg-white'}`}>
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs font-semibold" style={{ color: COLORS[v] }}>{name}</span>
+                <span className="text-xs font-semibold" style={{ color: COLORS[v % COLORS.length] }}>{name}</span>
                 {isNowDetected
-                  ? <span className="text-[10px] font-bold text-red-600 bg-red-100 px-1.5 py-0.5 rounded">⚠ 异常</span>
+                  ? <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-600">异常</span>
                   : everDetected
-                  ? <span className="text-[10px] font-medium text-orange-600 bg-orange-100 px-1.5 py-0.5 rounded">历史 {detCount}次</span>
+                  ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">历史 {detCount}次</span>
                   : null
                 }
               </div>

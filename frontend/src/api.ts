@@ -1,4 +1,4 @@
-import type { CreateSessionResponse, DatasetInfo, RunResults, SampleData, SessionInfo } from './types'
+import type { CreateSessionResponse, DatasetInfo, FaultScenario, RunResults, SampleData, SessionInfo } from './types'
 
 const API_BASE = '/api'
 
@@ -23,6 +23,7 @@ export interface CreateSessionPayload {
   T?: number
   seed?: number
   adtype?: string
+  fault_id?: string
   preprocessing?: number
   device?: string
 }
@@ -56,6 +57,11 @@ export async function runModel(sessionId: string, body: Record<string, any>): Pr
   return handleJson(res)
 }
 
+export async function stopTraining(sessionId: string): Promise<{ status: string; run_status?: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/run/stop`, { method: 'POST' })
+  return handleJson(res)
+}
+
 export function openProgressWS(sessionId: string): WebSocket {
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const host = window.location.host
@@ -72,8 +78,18 @@ export async function startStream(sessionId: string): Promise<{ status: string }
   return handleJson(res)
 }
 
-export async function injectAnomaly(sessionId: string): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stream/inject`, { method: 'POST' })
+export async function listFaultScenarios(datasetName = 'linear'): Promise<FaultScenario[]> {
+  const res = await fetch(`${API_BASE}/stream/fault-scenarios?dataset_name=${encodeURIComponent(datasetName)}`)
+  const data = await handleJson<{ faults: FaultScenario[] }>(res)
+  return data.faults
+}
+
+export async function injectAnomaly(sessionId: string, faultId = 'equipment_spike'): Promise<{ status: string; fault?: FaultScenario }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stream/inject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fault_id: faultId }),
+  })
   return handleJson(res)
 }
 
